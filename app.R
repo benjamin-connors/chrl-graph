@@ -48,7 +48,9 @@ qaqc_vars <-
     "DateTime",
     "WatYr",
     "Air_Temp",
+
     "RH",
+
     "BP",
     "Wind_Speed",
     "Wind_Dir",
@@ -101,8 +103,11 @@ icoLst <- awesomeIconList(
 # load graphing presets
 source('R/graph-presets.R')
 
-# load logo paths, parameter dictionary, stn name dictionary
+# load parameter dictionary, stn name dictionary
 source('R/dictionaries.R')
+
+# load logos
+source('R/define-logos.R')
 
 # Station Meta List - this is a nested list 
 source('R/station-meta-list.R')
