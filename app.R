@@ -1,4 +1,5 @@
 library(dplyr)
+library(tidyr)
 library(DBI)
 library(plotly)
 library(lubridate)
@@ -8,12 +9,20 @@ library(shinyWidgets)
 library(shinydashboard)
 library(dashboardthemes)
 library(weatherdash)
+library(fontawesome) #devtools::install_github("rstudio/fontawesome")
 
-Sys.setenv(TZ = 'UTC')
+# check if config.r file exists otherwise generate error
+if (!file.exists('config.r')) {
+  stop("Error: 'config.r' file does not exist. This file is not held on github for privacy reasons and must be provided by the database admin.")
+}
 
-# set colorblind safe color pallet 
-# http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/#a-colorblind-friendly-palette
+# two colours
+two_cols <- c(
+  rgb(204/255,51/255,17/255),
+  rgb(0,119/255,187/255)
+)
 
+# colour blind safe pallet
 cbs_pal <-
   c(
     "#000000",
@@ -22,6 +31,46 @@ cbs_pal <-
     "#F0E442",
     "#CC79A7",
     "#56B4E9"
+  )
+
+Sys.setenv(TZ = 'UTC')
+
+# set colorblind safe color pallet 
+# http://www.cookbook-r.com/Graphs/Colors_(ggplot2)/#a-colorblind-friendly-palette
+
+clean_qaqc_overlap_seconds <- 7 * 24 * 60 * 60 # get one week of overlap with qaqc data
+clean_data_name_display <- 'raw' # display name for the charts for the clean_ tables
+qaqc_data_name_display <- 'qaqc' # display name for the charts for the clean_ tables
+
+# QC vars 
+qaqc_vars <-
+  c(
+    "DateTime",
+    "WatYr",
+    "Air_Temp",
+
+    "RH",
+
+    "BP",
+    "Wind_Speed",
+    "Wind_Dir",
+    "Pk_Wind_Speed",
+    "Pk_Wind_Dir",
+    "PC_Tipper",
+    "PP_Tipper",
+    "PC_Raw_Pipe",
+    "PP_Pipe",
+    "Snow_Depth",
+    "SWE",
+    "Solar_Rad",
+    "SWU",
+    "SWL",
+    "LWU",
+    "LWL",
+    "Lysimeter",
+    "Soil_Moisture",
+    "Soil_Temperature",
+    "Batt"
   )
 
 # grab login creds
@@ -44,11 +93,21 @@ cur_stn = "apelake"
 siteNoticeMsg <- "Note: To automatically load your favourite station when you visit our site, select a station from the 'Choose a Weather Station' dropdown and then bookmark the link in the address bar. <br/>"
 tetrahedronDisclaimer <- "The tipping bucket is currently malfunctioning at this station and total precipitation (stand pipe) is shown instead."
 
+# map icons
+
+icoLst <- awesomeIconList(
+   real_time= makeAwesomeIcon(text = fa("tower-broadcast"), markerColor = 'blue'),
+  manual_download = makeAwesomeIcon(text = fa("usb"), markerColor = 'lightgray')
+)
+
 # load graphing presets
 source('R/graph-presets.R')
 
-# load logo paths, parameter dictionary, stn name dictionary
+# load parameter dictionary, stn name dictionary
 source('R/dictionaries.R')
+
+# load logos
+source('R/define-logos.R')
 
 # Station Meta List - this is a nested list 
 source('R/station-meta-list.R')
@@ -70,6 +129,8 @@ ui <- function(request) {
                               menuItem("Custom Graphs", tabName = "cstm_graph", icon = icon("fas fa-chart-line")),
                               menuItem("Annual Comparisons", tabName = "ann_compare", icon = icon("fas fa-chart-line")),
                               menuItem("Station Comparisons", tabName = "stn_compare", icon = icon("fas fa-chart-line")),
+                              menuItem("Monthly Normals", tabName = "monthly_normals", icon = icon("fas fa-chart-line")),
+                              menuItem("Hourly Statistics", tabName = "hourly_statistics", icon = icon("fas fa-chart-line")),
                               menuItem("Webcams", icon = icon("fas fa-camera"), href = "https://viu-hydromet-wx.ca/webcam-viewer/")
                   )
                 ),
@@ -94,6 +155,7 @@ ui <- function(request) {
                             )
                             
                     ),
+                    # weekly graph ----
                     tabItem("wkly_graph",
                             fluidRow(
                               column(12,
@@ -119,8 +181,6 @@ ui <- function(request) {
                                      
                                      
                               ),
-                              
-                              
                               column(width = 9,
                                      htmlOutput('header'),
                                      wellPanel(class ="line_graph_container",
@@ -135,6 +195,8 @@ ui <- function(request) {
                               )
                             )
                     ),
+                    # custom graph ----
+                    
                     tabItem("cstm_graph",
                             fluidRow(
                               column(12,
@@ -151,13 +213,19 @@ ui <- function(request) {
                                                  
                                      ),
                                      selectInput("custom_year", "Select Water Year", "",  selectize = F),
+                                     checkboxInput("plot_all_raw", "Plot all Raw Data?", FALSE),
                                      uiOutput("varSelection"),
-                                     uiOutput("cleanSnowButton")
+                                     uiOutput("cleanSnowButton"),
+                                     numericInput(
+                                       inputId = 'fig_height',
+                                       label = 'Figure Height in Pixels:',
+                                       value = 300
+                                     )
                               ),
                               column(10,
                                      htmlOutput('header2'),
                                      wellPanel(
-                                       plotlyOutput("plot1", height = "40vh"),
+                                       uiOutput("plot1_ui"),
                                        chooseSliderSkin('Flat',color = "#99ccff"),
                                        div(style = "margin-top:-3.5em; margin-bottom: -2em",
                                            fluidRow(uiOutput("slider"), align = 'center'))
@@ -167,6 +235,8 @@ ui <- function(request) {
                               
                             )
                     ),
+                    # annual comparisons graph ----
+                    
                     tabItem("ann_compare",
                             fluidRow(
                               column(12,
@@ -182,6 +252,13 @@ ui <- function(request) {
                                                  multiple = F,
                                                  selectize = F
                                      ),
+                                     selectInput("annual_data_type",
+                                                 label = "Data Type:",
+                                                 choices = c('QAQC', 'Raw'),
+                                                 selected = 'QAQC',
+                                                 selectize = F, 
+                                                 multiple = F
+                                     ),
                                      uiOutput("varSelection_ann"),
                                      selectInput("compare_year", "Select Years to Compare: ", "", multiple = T)
                               ),
@@ -194,6 +271,8 @@ ui <- function(request) {
                               )
                             )
                     ),
+                    # station comparisons ----
+                    
                     tabItem("stn_compare",
                             fluidRow(
                               column(12,
@@ -209,8 +288,15 @@ ui <- function(request) {
                                                  multiple = T,
                                                  selectize = T
                                      ),
+                                     selectInput("station_data_type",
+                                                 label = "Data Type:",
+                                                 choices = c('QAQC', 'Raw'),
+                                                 selected = 'QAQC',
+                                                 selectize = F, 
+                                                 multiple = F
+                                     ),
                                      uiOutput("varSelection_stn"),
-                                     selectInput("station_year", "Select Year to Compare: ", "")
+                                     selectInput("station_year", "Select Water Year to Compare: ", "")
                               ),
                               column(10,
                                      htmlOutput('header_compare_stn'),
@@ -219,7 +305,96 @@ ui <- function(request) {
                                      )
                               )
                             )
+                    ),
+                    # monthly normals ----
+                    
+                    tabItem("monthly_normals",
+                            fluidRow(
+                              column(12,
+                                     h1("Monthly Normals", align = "center")
+                              )
+                            ),
+                            fluidRow(
+                              column(2,
+                                     selectInput("monthly_site",
+                                                 label = "Choose a Weather Station:",
+                                                 choices = stnNameDict,
+                                                 selected = c('apelake'),
+                                                 multiple = F,
+                                                 selectize = T
+                                     ),
+                                     selectInput("monthly_var",
+                                                 label = "Select a Variable:",
+                                                 choices = pretty_stats_var_names_monthly,
+                                                 selected = c('Air_Temp'),
+                                                 multiple = F,
+                                                 selectize = T
+                                     ),
+                                     selectInput("monthly_year",
+                                                 "Select Water Year(s) to Compare: ",
+                                                 "",
+                                                 multiple = T),
+                                     selectInput("plot_type", 
+                                                 label = "Select Plot Type: ",
+                                                 choices = c('Boxplot', 'Line Graph', 'Bar Chart'),
+                                                 selected = c('Line Graph'),
+                                                 multiple = F,
+                                                 selectize = T),
+                                     # Conditional rendering of checkboxInput
+                                     uiOutput("filter_monthly_line_stats")
+                              ),
+                              column(10,
+                                     htmlOutput('header4'),
+                                     plotOutput('plot', height = "40vh"),
+                                     uiOutput('text_boxplot_explain'),
+                                     h3("Monthly Stats Table", align = "left"),
+                                     dataTableOutput('monthly_stats_text')
+                              )
+                            )
+                    ),
+                    # hourly stats ----
+                    
+                    tabItem("hourly_statistics",
+                            fluidRow(
+                              column(12,
+                                     h1("Hourly Statistics", align = "center")
+                              )
+                            ),
+                            fluidRow(
+                              column(2,
+                                     selectInput("hourly_site",
+                                                 label = "Choose a Weather Station:",
+                                                 choices = stnNameDict,
+                                                 selected = c('apelake'),
+                                                 multiple = F,
+                                                 selectize = T
+                                     ),
+                                     selectInput("hourly_var",
+                                                 label = "Select a Variable:",
+                                                 choices = pretty_stats_var_names_hourly,
+                                                 selected = c('Air_Temp'),
+                                                 multiple = F,
+                                                 selectize = T
+                                     ),
+                                     selectInput("hourly_year", "Select Water Year to Compare: ", "", multiple = T),
+                                     checkboxGroupInput("hourly_stats_checkbox",
+                                                        "Display the historic hourly statistics:",
+                                                        choices = list("Max-Min Range (blue shading)",
+                                                                       "5-95 Percentile \nRange (green shading)",
+                                                                       "Mean"),
+                                                        selected = list("5-95 Percentile Range"))
+                              ),
+                              column(10,
+                                     htmlOutput('header5'),
+                                     plotlyOutput('hourly_stats_plot', height = "40vh"),
+                                     tags$div(
+                                       textOutput("caption"),
+                                       style = "font-size: smaller; color: #555555;"
+                                     )
+                              )
+                            )
                     )
+                    
                   )
                   
                 )
@@ -263,6 +438,8 @@ server <- function(input, output, session) {
   source("classes/custom.r", local = TRUE)
   source("classes/annual.r", local = TRUE)
   source("classes/station_compare.r", local = TRUE)
+  source("classes/monthly_normals.r", local = TRUE)
+  source("classes/hourly_summary.R", local = TRUE)
   
   
   # enable bookmarking on URL

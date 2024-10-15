@@ -4,24 +4,11 @@ output$header2 <- renderUI({
   req(input$custom_site)
   str1 <- paste0("<h2>", station_meta[[input$custom_site]][1], " (", station_meta[[input$custom_site]][2], " m)", "</h2>")
   if(input$custom_site %in% list_stn_tipping_bucket_errs){
-    HTML(paste(str1, p('The tipping bucket is currently malfunctioning at this station please refer to total precipitation (precip pipe) instead.', style = "color:red")))
+    HTML(paste(str1, p('The tipping bucket is currently malfunctioning at this station please refer to total precipitation (stand pipe) instead.', style = "color:red")))
   }
   else{HTML(paste(str1))}
 })
-
-
-
-# pull data from mysql db based on user station and year input
-custom_data_query <- reactive({
-  req(input$custom_site)
-  req(input$custom_year)
-
-  conn <- do.call(DBI::dbConnect, args)
-  on.exit(DBI::dbDisconnect(conn))
-  query <- paste0("SELECT * FROM clean_", input$custom_site,  " where WatYr = ", input$custom_year, ";")
-  data <- dbGetQuery(conn, query)
-
-})
+# construct variables based on user selection for the database query ----
 
 # reactive element to create year list based on available years for chosen station
 observe({
@@ -35,12 +22,99 @@ observe({
 
 # get available variables for selected station
 output$varSelection <- renderUI({
+  
+  # could switch to drop down select and use this which works in any order:
+  # var_names <- names(sort(factor(wx_var_list[wx_var_list %in% input$wx_var],
+  #                                levels = input$wx_var, ordered = T)))
   # get colnames from reactive dataset
   stnVars <- unname(unlist(station_meta[[input$custom_site]][6]))
-
+  
   var_subset <- Filter(function(x) any(stnVars %in% x), varsDict)
+  
+  checkboxGroupInput(
+    inputId = "custom_var",
+    label = "Select Variables:",
+    choices = var_subset,
+    inline = FALSE,
+    selected = c("Air_Temp", "RH")
+  )
+})
 
-  checkboxGroupInput(inputId = "custom_var", label = "Select one or two variables:", choices = var_subset, inline = FALSE, selected = "Air_Temp")
+# get data from VIU Galiano database ----
+
+# pull QAQC data from mysql db based on user station and year input
+custom_qc_data_query <- reactive({
+  req(input$custom_site)
+  req(input$custom_year)
+  
+  conn <- do.call(DBI::dbConnect, args)
+  on.exit(DBI::dbDisconnect(conn))
+  query <-
+    paste0("SELECT ", paste(qaqc_vars, collapse = ", "), " FROM qaqc_",
+           input$custom_site,
+           " where WatYr = ",
+           input$custom_year,
+           ";")
+  
+  data <- dbGetQuery(conn, query)
+  
+  validate(
+    need(nrow(data) > 0,
+         'No QAQC data: Please select try another year, data is not available for this year and station yet.')
+  )
+  data$qc_level <- qaqc_data_name_display
+  
+  return(data)
+})
+
+# pull QAQC data from mysql db based on user station and year input
+qc_max_datetime <- reactive({
+  req(custom_qc_data_query())
+  max_dt <- max(custom_qc_data_query()$DateTime)
+  
+  return(max_dt)
+})
+
+# pull in CLEAN rawish data from mysql db based on user station and year input
+custom_clean_data_query <- reactive({
+  req(custom_qc_data_query())
+  req(qc_max_datetime())
+  req(input$custom_site)
+  req(input$custom_year)
+  
+  clean_query_start <- qc_max_datetime() - clean_qaqc_overlap_seconds
+  
+  conn <- do.call(DBI::dbConnect, args)
+  on.exit(DBI::dbDisconnect(conn))
+  
+  if(input$plot_all_raw){
+    query <-
+      paste0("SELECT * FROM clean_",
+             input$custom_site,
+             " where WatYr = ",
+             input$custom_year,
+             ";")
+  } else {
+    query <-
+      paste0("SELECT * FROM clean_",
+             input$custom_site,
+             " where WatYr = ",
+             input$custom_year,
+             " AND DateTime >= '",
+             clean_query_start,
+             "';")
+  }
+  
+  data <- dbGetQuery(conn, query)
+  
+  validate(
+    need(nrow(data) > 0,
+         'No Raw data: Please select try another year, data is not available for this year and station yet.')
+  )
+  data$qc_level <- clean_data_name_display
+  
+  return(data)
+  
 })
 
 output$cleanSnowButton <- renderUI({
@@ -52,23 +126,18 @@ output$cleanSnowButton <- renderUI({
                  selected = "no"
     )
   }
-
-})
-
-# ensure only two variables are selected
-observe({
-  if(length(input$custom_var) > 2){
-    updateCheckboxGroupInput(session, "custom_var", selected = tail(input$custom_var, 2))
-  }
+  
 })
 
 output$slider <- renderUI({
-  req(custom_data_query())
+  req(custom_qc_data_query())
+  req(custom_clean_data_query())
+  
   sliderInput(inputId = "sliderTimeRange", label = "",
-              min = min(custom_data_query()$DateTime),
-              max = max(custom_data_query()$DateTime),
-              value = c(min(custom_data_query()$DateTime),
-                        max(custom_data_query()$DateTime)),
+              min = min(custom_qc_data_query()$DateTime),
+              max = max(custom_clean_data_query()$DateTime),
+              value = c(min(custom_qc_data_query()$DateTime),
+                        max(custom_clean_data_query()$DateTime)),
               step = 3600,
               width = '85%',
               height )
@@ -77,64 +146,71 @@ output$slider <- renderUI({
 #filter preset data query
 customDataFilter <-  reactive({
   req(input$sliderTimeRange)
-  df <- custom_data_query()
-  df %>%  filter(DateTime >= input$sliderTimeRange[1] & DateTime <= input$sliderTimeRange[2])
+  qc_raw_data <- rbind(custom_clean_data_query(), custom_qc_data_query())
+  qc_raw_data$qc_level <-
+    ordered(qc_raw_data$qc_level,
+            c(clean_data_name_display, qaqc_data_name_display))
+  
+  qc_raw_data_out <- qc_raw_data %>%  dplyr::filter(DateTime >= input$sliderTimeRange[1] &
+                                                      DateTime <= input$sliderTimeRange[2])
+  return(qc_raw_data_out)
 })
 
 # final data set
 
-finalData <- reactive({
+final_custom_data <- reactive({
   req(customDataFilter())
   req(input$custom_var)
-
-  df <- customDataFilter()
-
+  
+  custom_data <- customDataFilter()
+  
   if("Snow_Depth" %in% input$custom_var) {
     req(input$cleanSnowCstm)
     if(input$cleanSnowCstm == "yes"){
       flag  <- ("Snow_Depth" %in% input$custom_var)
       clean <- input$cleanSnow
-      df <- spike_clean(data = df, 'DateTime', 'Snow_Depth', spike_th = 10, roc_hi_th = 40, roc_low_th = 75)
+      custom_data <- spike_clean(data = custom_data, 'DateTime', 'Snow_Depth', spike_th = 10, roc_hi_th = 40, roc_low_th = 75)
     }
-    else{return(df)}
+    else{return(custom_data)}
   }
-  return(df)
+  return(custom_data)
 })
 
 
-# plot for custom graphs page
 output$plot1 <- renderPlotly({
   req(input$custom_site)
   req(input$custom_year)
   req(input$custom_var)
-  req(finalData())
-
-  df <- finalData() %>%
-    select(DateTime, input$custom_var)
-
-  varNames <- names(Filter(function(x) unlist(x) %in% input$custom_var, varsDict))
-
-  if(length(input$custom_var) ==  2){
-    
-    weatherdash::graph_two(
-      data = df,
-      x = "DateTime",
-      y1 = 2,
-      y2 = 3, 
-      y1_name = varNames[1], 
-      y2_name = varNames[2]
-    )
-
-  } else {
-    
-    weatherdash::graph_one(
-      data = df,
-      x = "DateTime",
-      y1 = 2,
-      y1_name = varNames[1]
-    )
+  req(final_custom_data())
+  
+  # Inspect the data
+  custom_data <- final_custom_data()
+  print(str(custom_data))  # Check the structure of the data
+  print(head(custom_data))  # View the first few rows
+  
+  # Use a single variable for initial plotting
+  selected_var <- input$custom_var[1]  # Select the first variable from the list
+  
+  # Ensure the selected variable exists
+  if (!selected_var %in% names(custom_data)) {
+    stop("Selected variable does not exist in the data.")
   }
+  
+  
+  # Basic line plot
+  p <- ggplot(custom_data, aes(x = DateTime, y = !!sym(selected_var), color = qc_level)) +
+    geom_line() +
+    labs(y = selected_var, x = "DateTime", color = "Data Type") +
+    theme_bw()
+  
+  # Convert to plotly
+  ggplotly(p) |> 
+    layout(plot_bgcolor = "#f5f5f5", paper_bgcolor = "#f5f5f5",
+           margin = list(b = 0, r = 50, l = 50, t = 10))
+})
 
+output$plot1_ui <- renderUI({
+  plotlyOutput('plot1', height = length(input$custom_var) * input$fig_height)
 })
 
 #### render partner logo ui ####
@@ -159,5 +235,3 @@ observe({
   }
 }
 )
-
-

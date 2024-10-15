@@ -145,7 +145,17 @@ output$plot_Snow <- renderPlotly({
     snowName <- "Snow Depth (cm)"
 
   }
-
+  # specific case for tetrahedron while snow depth is out
+  
+  else if(input$preset_site == 'tetrahedron'){
+    df <- preset_data_query() %>%
+      select(DateTime, snow = SWE, precip = PP_Tipper) %>%
+      mutate(precip = ifelse(precip < 0, 0, precip))
+    
+    precipName <- "Rain (mm)"
+    snowName <- "Snow Water Equivalent (mm)"
+    
+  }
   else {
     df <- preset_data_query() %>%
       select(DateTime, snow = Snow_Depth, precip = PP_Tipper)
@@ -155,7 +165,6 @@ output$plot_Snow <- renderPlotly({
 
   # clean snow depth data
 if(input$cleanSnow == "yes"){
-  
   df_cln <- spike_clean(data = df, 'DateTime', 'snow', spike_th = 10, roc_hi_th = 40, roc_low_th = 75)
   weatherdash::graph_two(
     data = as.data.frame(df_cln),
