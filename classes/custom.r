@@ -55,7 +55,7 @@ custom_qc_data_query <- reactive({
            " where WatYr = ",
            input$custom_year,
            ";")
-
+  
   data <- dbGetQuery(conn, query)
   
   validate(
@@ -71,7 +71,7 @@ custom_qc_data_query <- reactive({
 qc_max_datetime <- reactive({
   req(custom_qc_data_query())
   max_dt <- max(custom_qc_data_query()$DateTime)
-
+  
   return(max_dt)
 })
 
@@ -83,7 +83,7 @@ custom_clean_data_query <- reactive({
   req(input$custom_year)
   
   clean_query_start <- qc_max_datetime() - clean_qaqc_overlap_seconds
-
+  
   conn <- do.call(DBI::dbConnect, args)
   on.exit(DBI::dbDisconnect(conn))
   
@@ -104,9 +104,9 @@ custom_clean_data_query <- reactive({
              clean_query_start,
              "';")
   }
-
+  
   data <- dbGetQuery(conn, query)
-
+  
   validate(
     need(nrow(data) > 0,
          'No Raw data: Please select try another year, data is not available for this year and station yet.')
@@ -114,7 +114,7 @@ custom_clean_data_query <- reactive({
   data$qc_level <- clean_data_name_display
   
   return(data)
-
+  
 })
 
 output$cleanSnowButton <- renderUI({
@@ -126,7 +126,7 @@ output$cleanSnowButton <- renderUI({
                  selected = "no"
     )
   }
-
+  
 })
 
 output$slider <- renderUI({
@@ -152,7 +152,7 @@ customDataFilter <-  reactive({
             c(clean_data_name_display, qaqc_data_name_display))
   
   qc_raw_data_out <- qc_raw_data %>%  dplyr::filter(DateTime >= input$sliderTimeRange[1] &
-                                   DateTime <= input$sliderTimeRange[2])
+                                                      DateTime <= input$sliderTimeRange[2])
   return(qc_raw_data_out)
 })
 
@@ -161,9 +161,9 @@ customDataFilter <-  reactive({
 final_custom_data <- reactive({
   req(customDataFilter())
   req(input$custom_var)
-
+  
   custom_data <- customDataFilter()
-
+  
   if("Snow_Depth" %in% input$custom_var) {
     req(input$cleanSnowCstm)
     if(input$cleanSnowCstm == "yes"){
@@ -177,40 +177,40 @@ final_custom_data <- reactive({
 })
 
 
-# plot for custom graphs page
 output$plot1 <- renderPlotly({
   req(input$custom_site)
   req(input$custom_year)
   req(input$custom_var)
   req(final_custom_data())
-  req(custom_clean_data_query())
-  req(custom_qc_data_query())
   
-  custom_data <- final_custom_data() %>%
-    select(DateTime, input$custom_var, qc_level) |> 
-    pivot_longer(input$custom_var) |> 
-    mutate(ylab = purrr::map_chr(name, function(short_name)
-      names(varsDict)[which(unlist(varsDict) == short_name)]))
+  # Inspect the data
+  custom_data <- final_custom_data()
+  print(str(custom_data))  # Check the structure of the data
+  print(head(custom_data))  # View the first few rows
   
-  ggplot(custom_data, aes(DateTime, value, colour = qc_level)) +
+  # Use a single variable for initial plotting
+  selected_var <- input$custom_var[1]  # Select the first variable from the list
+  
+  # Ensure the selected variable exists
+  if (!selected_var %in% names(custom_data)) {
+    stop("Selected variable does not exist in the data.")
+  }
+  
+  
+  # Basic line plot
+  p <- ggplot(custom_data, aes(x = DateTime, y = !!sym(selected_var), color = qc_level)) +
     geom_line() +
-    facet_grid(rows = vars(ylab), switch = "y", scales = 'free_y') +
-    ylab(element_blank())  +
-    xlab(element_blank())  +
-    scale_color_manual(values = two_cols) +
-    labs(color = "Data Type") +
-    theme_bw() #+
-    # theme(strip.placement = "outside",
-    #       strip.background = element_rect(fill="white", colour = "white"))
-  plotly::ggplotly() |> 
+    labs(y = selected_var, x = "DateTime", color = "Data Type") +
+    theme_bw()
+  
+  # Convert to plotly
+  ggplotly(p) |> 
     layout(plot_bgcolor = "#f5f5f5", paper_bgcolor = "#f5f5f5",
-           margin = list(b = 0, r = 50, 
-                         l = 50, t = 10))
-
+           margin = list(b = 0, r = 50, l = 50, t = 10))
 })
 
 output$plot1_ui <- renderUI({
-  plotlyOutput('plot1', height = length(input$custom_var)*input$fig_height)
+  plotlyOutput('plot1', height = length(input$custom_var) * input$fig_height)
 })
 
 #### render partner logo ui ####
@@ -235,5 +235,3 @@ observe({
   }
 }
 )
-
-
